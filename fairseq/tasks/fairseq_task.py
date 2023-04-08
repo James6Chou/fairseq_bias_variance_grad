@@ -562,6 +562,122 @@ class FairseqTask(object):
 
         return loss, sample_size, logging_output
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def train_step(
+        self, sample, model, criterion, optimizer, update_num, ignore_grad=False
+    ):
+        """
+        Do forward and backward, and return the loss as computed by *criterion*
+        for the given *model* and *sample*.
+
+        Args:
+            sample (dict): the mini-batch. The format is defined by the
+                :class:`~fairseq.data.FairseqDataset`.
+            model (~fairseq.models.BaseFairseqModel): the model
+            criterion (~fairseq.criterions.FairseqCriterion): the criterion
+            optimizer (~fairseq.optim.FairseqOptimizer): the optimizer
+            update_num (int): the current update
+            ignore_grad (bool): multiply loss by 0 if this is set to True
+
+        Returns:
+            tuple:
+                - the loss
+                - the sample size, which is used as the denominator for the
+                  gradient
+                - logging outputs to display while training
+        """
+        model.train()
+        model.set_num_updates(update_num)
+        with torch.autograd.profiler.record_function("forward"):
+            with torch.cuda.amp.autocast(enabled=(isinstance(optimizer, AMPOptimizer))):
+                loss, sample_size, logging_output,loss_up,loss_down = criterion(model, sample)#要在这里动刀了！
+
+
+        if ignore_grad:
+            loss *= 0
+        with torch.autograd.profiler.record_function("backward"):
+            # print("loss_up",loss_up)
+            # print("loss_down",loss_down)
+            # print("loss",loss)
+            grad_up = torch.autograd.grad(outputs=loss_up,inputs=model.parameters(),retain_graph=True,create_graph=True)
+            grad_down = torch.autograd.grad(outputs=loss_down,inputs=model.parameters(),retain_graph=True,create_graph=True)
+            # for i in range(0,len(grad_up)):
+            #     if(grad_up[i].requires_grad==False):
+            #         print(torch.autograd.grad(outputs=loss,inputs=list(model.parameters())[i],retain_graph=True,create_graph=True)[0].requires_grad)
+            #         print(grad_up[i].requires_grad,grad_down[i].requires_grad,grad_all[i].requires_grad,list(model.named_parameters())[i][0],list(model.named_parameters())[i][1].shape)
+
+"""测试一下"""
+            for i in range(0,len(grad_up)):
+                if(grad_up[i].requires_grad==True):
+                    #print("torch.sum(grad_up[i]-grad_down[i])",torch.sum(grad_up[i]-grad_down[i]))
+                    #print(list(model.named_parameters())[i][0])
+                    #print("list(model.parameters())[i]",list(model.parameters())[i])
+                    #print(i,"require_grad true:",list(model.named_parameters())[i][0])
+                    self.grad_grads.append(torch.autograd.grad(outputs=torch.sum(torch.pow((grad_up[i]-grad_down[i]),2)),inputs=list(model.parameters())[i],retain_graph=True,allow_unused=True)[0])
+                    #print(self.grad_grads[-1])
+                else:
+                    #print(i,":",list(model.named_parameters())[i][0])
+                    self.grad_grads.append([])
+
+            # print(self.grad_grads)
+            # print(model.model)
+            optimizer.backward(loss) #这里其实就是loss.backward
+            t = 0
+            trad_off = 0.00001
+            for i,j in model.named_parameters():
+                #print(t)
+                #print(self.grad_grads[t])
+                if(grad_up[t].requires_grad and self.grad_grads[t]!=None):
+                    j.grad = (1-trad_off)*j.grad + trad_off*self.grad_grads[t]
+                t+=1
+
+
+            # print(type(model.encoder))
+            # for item,j in model.named_parameters():
+            #     print(item,j.grad.shape)
+
+        return loss, sample_size, logging_output
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     def valid_step(self, sample, model, criterion):
         model.eval()
         with torch.no_grad():
