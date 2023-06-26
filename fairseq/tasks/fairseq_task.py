@@ -16,6 +16,7 @@ from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.utils import gen_parser_from_dataclass
 from fairseq.optim.amp_optimizer import AMPOptimizer
 from omegaconf import DictConfig
+import torch.nn.functional as F
 
 
 
@@ -524,35 +525,48 @@ class FairseqTask(object):
             # print("loss",loss)
             grad_up = torch.autograd.grad(outputs=loss_up,inputs=model.parameters(),retain_graph=True,create_graph=True)
             grad_down = torch.autograd.grad(outputs=loss_down,inputs=model.parameters(),retain_graph=True,create_graph=True)
+
             # for i in range(0,len(grad_up)):
             #     if(grad_up[i].requires_grad==False):
             #         print(torch.autograd.grad(outputs=loss,inputs=list(model.parameters())[i],retain_graph=True,create_graph=True)[0].requires_grad)
             #         print(grad_up[i].requires_grad,grad_down[i].requires_grad,grad_all[i].requires_grad,list(model.named_parameters())[i][0],list(model.named_parameters())[i][1].shape)
 
-
+           # grad_diff = tuple(F.kl_div(torch.log(torch.softmax(g1.view(-1)/torch.max(g1),dim=0)),torch.softmax(g2.view(-1)/torch.max(g2),dim=0),reduction='sum')+F.kl_div(torch.log(torch.softmax(g2.view(-1)/torch.max(g2),dim=0)),torch.softmax(g1.view(-1)/torch.max(g1),dim=0),reduction='sum') for g1, g2 in zip(grad_up, grad_down))
+            
             self.grad_grads = []
             for i in range(0,len(grad_up)):
                 if(grad_up[i].requires_grad==True):
-                    #print("torch.sum(grad_up[i]-grad_down[i])",torch.sum(grad_up[i]-grad_down[i]))
-                    #print(list(model.named_parameters())[i][0])
-                    #print("list(model.parameters())[i]",list(model.parameters())[i])
-                    #print(i,"require_grad true:",list(model.named_parameters())[i][0])
                     self.grad_grads.append(torch.autograd.grad(outputs=torch.sum(torch.pow((grad_up[i]-grad_down[i]),2)),inputs=list(model.parameters())[i],retain_graph=True,allow_unused=True)[0])
-                    #print(self.grad_grads[-1])
                 else:
-                    #print(i,":",list(model.named_parameters())[i][0])
                     self.grad_grads.append([])
+
+
+            #grad_sum = torch.sum(torch.stack(grad_diff))
+            #self.grad_grads = torch.autograd.grad(outputs=grad_sum,inputs=model.parameters(),retain_graph=True)
+
 
             # print(self.grad_grads)
             # print(model.model)
             optimizer.backward(loss) #这里其实就是loss.backward
             t = 0
-            trad_off = 0.00001
+            trad_off = 0.1
             for i,j in model.named_parameters():
                 #print(t)
                 #print(self.grad_grads[t])
                 if(grad_up[t].requires_grad and self.grad_grads[t]!=None):
-                    j.grad = (1-trad_off)*j.grad + trad_off*self.grad_grads[t]
+                    # print("0:",torch.sum(torch.abs(j.grad)),"1:",torch.sum(torch.abs(self.grad_grads[t])))
+
+                    # g_sum1 = torch.sum(torch.abs(j.grad))
+                    # g_sum2 = torch.sum(torch.abs(self.grad_grads[t]))
+
+                    # print("0:",torch.sum(torch.abs(j.grad)),"1:",torch.sum(torch.abs(self.grad_grads[t])))
+                    # print(g_sum1/g_sum2)
+                    # if(g_sum1/g_sum2<1):# 因为有时候会很大，甚至inf
+                    #     j.grad = (1-trad_off)*j.grad + (g_sum1/g_sum2)*trad_off*self.grad_grads[t]
+                    # else:
+                    if(torch.max(torch.abs(self.grad_grads[t]))!=0):
+                        j.grad = (1-trad_off)*j.grad + trad_off*self.grad_grads[t]/torch.max(torch.abs(self.grad_grads[t]))
+                
                 t+=1
 
 
@@ -561,112 +575,6 @@ class FairseqTask(object):
             #     print(item,j.grad.shape)
 
         return loss, sample_size, logging_output
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def train_step(
-        self, sample, model, criterion, optimizer, update_num, ignore_grad=False
-    ):
-        """
-        Do forward and backward, and return the loss as computed by *criterion*
-        for the given *model* and *sample*.
-
-        Args:
-            sample (dict): the mini-batch. The format is defined by the
-                :class:`~fairseq.data.FairseqDataset`.
-            model (~fairseq.models.BaseFairseqModel): the model
-            criterion (~fairseq.criterions.FairseqCriterion): the criterion
-            optimizer (~fairseq.optim.FairseqOptimizer): the optimizer
-            update_num (int): the current update
-            ignore_grad (bool): multiply loss by 0 if this is set to True
-
-        Returns:
-            tuple:
-                - the loss
-                - the sample size, which is used as the denominator for the
-                  gradient
-                - logging outputs to display while training
-        """
-        model.train()
-        model.set_num_updates(update_num)
-        with torch.autograd.profiler.record_function("forward"):
-            with torch.cuda.amp.autocast(enabled=(isinstance(optimizer, AMPOptimizer))):
-                loss, sample_size, logging_output,loss_up,loss_down = criterion(model, sample)#要在这里动刀了！
-
-
-        if ignore_grad:
-            loss *= 0
-        with torch.autograd.profiler.record_function("backward"):
-            # print("loss_up",loss_up)
-            # print("loss_down",loss_down)
-            # print("loss",loss)
-            grad_up = torch.autograd.grad(outputs=loss_up,inputs=model.parameters(),retain_graph=True,create_graph=True)
-            grad_down = torch.autograd.grad(outputs=loss_down,inputs=model.parameters(),retain_graph=True,create_graph=True)
-            # for i in range(0,len(grad_up)):
-            #     if(grad_up[i].requires_grad==False):
-            #         print(torch.autograd.grad(outputs=loss,inputs=list(model.parameters())[i],retain_graph=True,create_graph=True)[0].requires_grad)
-            #         print(grad_up[i].requires_grad,grad_down[i].requires_grad,grad_all[i].requires_grad,list(model.named_parameters())[i][0],list(model.named_parameters())[i][1].shape)
-
-"""测试一下"""
-            for i in range(0,len(grad_up)):
-                if(grad_up[i].requires_grad==True):
-                    #print("torch.sum(grad_up[i]-grad_down[i])",torch.sum(grad_up[i]-grad_down[i]))
-                    #print(list(model.named_parameters())[i][0])
-                    #print("list(model.parameters())[i]",list(model.parameters())[i])
-                    #print(i,"require_grad true:",list(model.named_parameters())[i][0])
-                    self.grad_grads.append(torch.autograd.grad(outputs=torch.sum(torch.pow((grad_up[i]-grad_down[i]),2)),inputs=list(model.parameters())[i],retain_graph=True,allow_unused=True)[0])
-                    #print(self.grad_grads[-1])
-                else:
-                    #print(i,":",list(model.named_parameters())[i][0])
-                    self.grad_grads.append([])
-
-            # print(self.grad_grads)
-            # print(model.model)
-            optimizer.backward(loss) #这里其实就是loss.backward
-            t = 0
-            trad_off = 0.00001
-            for i,j in model.named_parameters():
-                #print(t)
-                #print(self.grad_grads[t])
-                if(grad_up[t].requires_grad and self.grad_grads[t]!=None):
-                    j.grad = (1-trad_off)*j.grad + trad_off*self.grad_grads[t]
-                t+=1
-
-
-            # print(type(model.encoder))
-            # for item,j in model.named_parameters():
-            #     print(item,j.grad.shape)
-
-        return loss, sample_size, logging_output
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
